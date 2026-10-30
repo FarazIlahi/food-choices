@@ -90,25 +90,9 @@ end;$$;
 
 create or replace function public.fc_ballot(p_code text,p_day date) returns jsonb
 language plpgsql security definer set search_path = '' as $$
-declare rid uuid:=food_private.room(p_code); meal_data jsonb; vote_data jsonb; offset_day integer;
+declare rid uuid:=food_private.room(p_code); meal_data jsonb; vote_data jsonb;
 begin
  perform food_private.check_day(rid,p_day,false);
- -- Serialize first-time seeding and suggestions so every phone sees the same choices.
- perform 1 from food_private.rooms where id=rid for update;
- if not exists(select 1 from food_private.meals where room_id=rid and day=p_day) then
-   offset_day:=((p_day-date '2020-01-01')%8+8)%8;
-   insert into food_private.meals(room_id,day,name,emoji,category,time)
-   select rid,p_day,x.name,x.emoji,x.category,x.mins from (values
-    (0,'Chicken shawarma bowls','🥙','Comfort food',30),
-    (1,'Creamy tomato pasta','🍝','Vegetarian',25),
-    (2,'Build-your-own tacos','🌮','Quick & easy',20),
-    (3,'Salmon & roasted veggies','🐟','Fresh & light',30),
-    (4,'Homemade pizza night','🍕','Comfort food',40),
-    (5,'Chickpea coconut curry','🍛','Vegetarian',30),
-    (6,'Garlic chicken stir-fry','🥡','Quick & easy',20),
-    (7,'Chicken biryani','🍚','Comfort food',50)
-   ) as x(n,name,emoji,category,mins) where ((x.n-offset_day+8)%8)<3;
- end if;
  select coalesce(pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object('id',id,'name',name,'emoji',emoji,'category',category,'time',time) order by name),'[]'::jsonb)
  into meal_data from food_private.meals where room_id=rid and day=p_day;
  select coalesce(pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object('member_id',v.member_id,'meal_id',v.meal_id,'name',m.name) order by m.name),'[]'::jsonb)

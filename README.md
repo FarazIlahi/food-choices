@@ -1,5 +1,7 @@
 # Food Choices
 
-A family meal planner with daily voting and weekly results.
+A simple daily food vote: add options and vote for your favorite.
 
-This published version currently runs in preview mode. Votes are saved only in each browser until a Supabase project is connected. Public project connection settings belong in config.js. Never put a database password or secret key in this repository.
+New days start empty. Each option shows its vote count and voter names.
+
+This deployment is in preview mode. Votes stay on each device until the shared Supabase database is connected. Public project connection settings belong in config.js. Never put a database password or secret key here.
