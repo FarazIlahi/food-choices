@@ -12,7 +12,7 @@ function toast(message){$('#toast').textContent=message;$('#toast').classList.ad
 function modal(html){$('#dialog-content').innerHTML=html;dialog.showModal()}
 $('#close-dialog').onclick=()=>dialog.close();
 dialog.addEventListener('click',e=>{if(e.target===dialog){const r=dialog.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)dialog.close()}});
-async function rpc(name,args){const r=await fetch(`${config.url.replace(/\/$/,'')}/rest/v1/rpc/${name}`,{method:'POST',headers:{apikey:config.key,'Content-Type':'application/json'},body:JSON.stringify(args),signal:AbortSignal.timeout(15000)});const data=await r.json();if(!r.ok)throw Error(data.message||'Could not connect. Please try again.');return data}
+async function rpc(name,args){const r=await fetch(`${config.url.replace(/\/$/,'')}/rest/v1/rpc/${name}`,{method:'POST',headers:{apikey:config.key,'Content-Type':'application/json'},body:JSON.stringify(args),signal:AbortSignal.timeout(15000)});const body=await r.text();let data=null;try{data=body?JSON.parse(body):null}catch{if(r.ok)throw Error('Unexpected response. Please try again.')}if(!r.ok)throw Error(data?.message||'Could not connect. Please try again.');return data}
 function demoBallot(day){if(!demo[day]){demo[day]={meals:[],votes:[]};save('fc-demo',demo)}return structuredClone(demo[day])}
 async function getBallot(day){return connected()?rpc('fc_ballot',{p_code:family.code,p_day:day}):demoBallot(day)}
 function header(){const on=connected();$('#connection').textContent=on?'Family connected':'Preview';$('#connection').classList.toggle('live',on);$('#family-button').textContent=on?`${family.name} · Family`:'Connect family';$('#demo-note').hidden=on}
@@ -78,4 +78,4 @@ $('#option-form').onsubmit=addOption;
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)load(true)});
 window.addEventListener('storage',e=>{if(e.key==='fc-demo'){demo=read('fc-demo',{});load(true)}});
 setInterval(()=>{if(connected()&&!document.hidden&&!busy&&!dialog.open)load(true)},10000);
-load();if(inviteCode&&!family)setTimeout(familyDialog,350);
+load();if((inviteCode||(config.url&&config.key))&&!family)setTimeout(familyDialog,350);
