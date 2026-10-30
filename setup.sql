@@ -136,3 +136,124 @@ grant execute on function public.fc_ballot(text,date) to anon,authenticated;
 grant execute on function public.fc_suggest(text,uuid,date,text,text,integer,text) to anon,authenticated;
 grant execute on function public.fc_vote(text,uuid,date,uuid) to anon,authenticated;
 commit;
+-- Reuse an existing membership on another device without creating a second voter.
+begin;
+create or replace function public.fc_resume(p_code text,p_token uuid) returns jsonb
+language plpgsql security definer set search_path = '' as $$
+declare rid uuid:=food_private.room(p_code); mid uuid:=food_private.member(rid,p_token);
+begin
+ return (select pg_catalog.jsonb_build_object('member_id',id,'name',name)
+         from food_private.members where id=mid and room_id=rid);
+end;$$;
+revoke all on function public.fc_resume(text,uuid) from public;
+grant execute on function public.fc_resume(text,uuid) to anon,authenticated;
+commit;
+-- Keep a family library of options and carry them into later daily ballots.
+begin;
+create or replace function food_private.option_key(p_name text) returns text
+language sql immutable set search_path = '' as $$
+ select coalesce(pg_catalog.string_agg(token,' ' order by token collate "C"),'') from (
+  select case when word='biriyani' then 'biryani' when word='bbq' then 'barbecue'
+   when word='fries' then 'fry'
+   when length(word)>4 and word like '%s' and word not like '%ss' then left(word,length(word)-1)
+   else word end as token
+  from pg_catalog.regexp_split_to_table(pg_catalog.btrim(pg_catalog.regexp_replace(pg_catalog.lower(p_name),'[^[:alnum:]]+',' ','g')),' +') as word
+  where word<>'' and word not in ('and','with','the')
+ ) words;
+$$;
+create or replace function food_private.option_distance(a text,b text) returns integer
+language plpgsql immutable set search_path = '' as $$
+declare prev integer[]; curr integer[]; i integer; j integer;
+begin
+ if a=b then return 0; end if;
+ if length(a)=0 then return length(b); end if;
+ if length(b)=0 then return length(a); end if;
+ prev:=array(select n from pg_catalog.generate_series(0,length(b)) n);
+ for i in 1..length(a) loop
+  curr:=array[i];
+  for j in 1..length(b) loop
+   curr:=pg_catalog.array_append(curr,least(curr[j]+1,prev[j+1]+1,prev[j]+case when substr(a,i,1)=substr(b,j,1) then 0 else 1 end));
+  end loop;
+  prev:=curr;
+ end loop;
+ return prev[length(b)+1];
+end;$$;
+create table if not exists food_private.options (
+ id uuid primary key default gen_random_uuid(),
+ room_id uuid not null references food_private.rooms(id),
+ name text not null check(length(name) between 1 and 80),
+ name_key text not null,
+ first_day date not null,
+ unique(room_id,name_key)
+);
+alter table food_private.options enable row level security;
+revoke all on food_private.options from public,anon,authenticated;
+alter table food_private.meals add column if not exists option_id uuid references food_private.options(id);
+create or replace function food_private.find_option(p_room uuid,p_name text) returns uuid
+language sql stable security definer set search_path = '' as $$
+ select id from food_private.options
+ where room_id=p_room and (
+  name_key=food_private.option_key(p_name) or
+  (least(length(name_key),length(food_private.option_key(p_name)))>=5
+   and abs(length(name_key)-length(food_private.option_key(p_name)))<=2
+   and food_private.option_distance(name_key,food_private.option_key(p_name))<=case when least(length(name_key),length(food_private.option_key(p_name)))>=10 then 2 else 1 end)
+ ) order by (name_key=food_private.option_key(p_name)) desc,first_day,id limit 1;
+$$;
+-- Import existing submissions without rewriting historical votes or deleting meals.
+do $$declare m record; existing uuid;
+begin
+ for m in select * from food_private.meals order by day,id loop
+  existing:=food_private.find_option(m.room_id,m.name);
+  if existing is null then
+   insert into food_private.options(room_id,name,name_key,first_day) values(m.room_id,m.name,food_private.option_key(m.name),m.day) returning id into existing;
+  else
+   update food_private.options set first_day=least(first_day,m.day) where id=existing;
+  end if;
+  update food_private.meals set option_id=existing where room_id=m.room_id and day=m.day and id=m.id;
+ end loop;
+end;$$;
+create or replace function public.fc_ballot(p_code text,p_day date) returns jsonb
+language plpgsql security definer set search_path = '' as $$
+declare rid uuid:=food_private.room(p_code); meal_data jsonb; vote_data jsonb;
+begin
+ perform food_private.check_day(rid,p_day,false);
+ perform 1 from food_private.rooms where id=rid for update;
+ insert into food_private.meals(room_id,day,name,emoji,category,time,option_id)
+ select rid,p_day,o.name,'🍽️','Comfort food',null,o.id from food_private.options o
+ where o.room_id=rid and o.first_day<=p_day and not exists(
+  select 1 from food_private.meals m where m.room_id=rid and m.day=p_day
+   and m.option_id=o.id
+ ) on conflict do nothing;
+ select coalesce(pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object('id',id,'name',name,'emoji',emoji,'category',category,'time',time) order by name),'[]'::jsonb)
+ into meal_data from food_private.meals where room_id=rid and day=p_day;
+ select coalesce(pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object('member_id',v.member_id,'meal_id',v.meal_id,'name',m.name) order by m.name),'[]'::jsonb)
+ into vote_data from food_private.votes v join food_private.members m on m.id=v.member_id where v.room_id=rid and v.day=p_day;
+ return pg_catalog.jsonb_build_object('meals',meal_data,'votes',vote_data);
+end;$$;
+create or replace function public.fc_suggest(p_code text,p_token uuid,p_day date,p_name text,p_category text,p_time integer,p_emoji text) returns void
+language plpgsql security definer set search_path = '' as $$
+declare rid uuid:=food_private.room(p_code); existing uuid; original text; first_date date; new_option uuid;
+begin
+ perform food_private.member(rid,p_token);
+ perform food_private.check_day(rid,p_day,true);
+ if p_name is null or length(pg_catalog.btrim(p_name)) not between 1 and 80 or food_private.option_key(p_name)='' then raise exception 'Enter a food option between 1 and 80 characters.'; end if;
+ perform 1 from food_private.rooms where id=rid for update;
+ existing:=food_private.find_option(rid,p_name);
+ if existing is not null then
+  select name,first_day into original,first_date from food_private.options where id=existing;
+  if first_date>p_day then
+   update food_private.options set first_day=p_day where id=existing;
+   perform public.fc_ballot(p_code,p_day);return;
+  end if;
+  raise exception 'Already saved as "%". Choose it from the options.',original;
+ end if;
+ if (select count(*) from food_private.options where room_id=rid)>=100 then raise exception 'You can save up to 100 food options.'; end if;
+ insert into food_private.options(room_id,name,name_key,first_day) values(rid,pg_catalog.btrim(p_name),food_private.option_key(p_name),p_day) returning id into new_option;
+ insert into food_private.meals(room_id,day,name,emoji,category,time,option_id) values(rid,p_day,pg_catalog.btrim(p_name),'🍽️','Comfort food',null,new_option);
+end;$$;
+revoke all on all functions in schema food_private from public,anon,authenticated;
+revoke all on function public.fc_ballot(text,date) from public;
+revoke all on function public.fc_suggest(text,uuid,date,text,text,integer,text) from public;
+grant execute on function public.fc_ballot(text,date) to anon,authenticated;
+grant execute on function public.fc_suggest(text,uuid,date,text,text,integer,text) to anon,authenticated;
+commit;

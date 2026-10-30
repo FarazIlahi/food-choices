@@ -1,7 +1,7 @@
 # Food Choices
 
-A simple daily food vote: add options and vote for your favorite.
+A simple daily food vote for the family. Saved food options carry forward; votes stay separate for each day. Duplicate checks catch punctuation, plurals, word order, and small spelling differences.
 
-Shared voting is connected to Supabase. Create a family once, then share its private invite link so everyone joins the same voting list. Results refresh every 10 seconds.
+For your own phone or laptop, open Family and choose Copy my phone sign-in link. Keep that personal link private. Use Copy family invite for other people.
 
-New days start empty. Each option shows its vote count and voter names. Public connection settings are in config.js; database passwords and secret keys must never be committed.
+Shared voting is connected to Supabase and refreshes every 10 seconds.

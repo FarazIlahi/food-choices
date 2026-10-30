@@ -1,11 +1,14 @@
-import {dateKey,shiftDate,weekDates,escapeHTML as esc} from './core.js?v=4';
+import {dateKey,shiftDate,weekDates,escapeHTML as esc,optionKey,similarOption} from './core.js?v=6';
 const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
 const read=(k,f)=>{try{return JSON.parse(localStorage.getItem(k))??f}catch{return f}};
 const save=(k,v)=>localStorage.setItem(k,JSON.stringify(v));
 let config=window.FOOD_CONFIG?.url?window.FOOD_CONFIG:read('fc-config',{});
 let family=read('fc-family',null),selected=dateKey(),ballot={meals:[],votes:[]},sequence=0,busy=false;
 let demo=read('fc-demo',{}),demoName=read('fc-demo-name','');
-const inviteCode=new URLSearchParams(location.hash.slice(1)).get('family');
+const inviteParams=new URLSearchParams(location.hash.slice(1));
+const inviteCode=inviteParams.get('family'),personalToken=inviteParams.get('member');
+// Remove the sign-in credential from browser history before making requests.
+if(personalToken){inviteParams.delete('member');history.replaceState(null,'',location.pathname+location.search+(inviteParams.size?'#'+inviteParams.toString():''))}
 const connected=()=>Boolean(config.url&&config.key&&family);
 const dialog=$('#dialog');let toastTimer;
 function toast(message){$('#toast').textContent=message;$('#toast').classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('#toast').classList.remove('show'),4000)}
@@ -13,7 +16,12 @@ function modal(html){$('#dialog-content').innerHTML=html;dialog.showModal()}
 $('#close-dialog').onclick=()=>dialog.close();
 dialog.addEventListener('click',e=>{if(e.target===dialog){const r=dialog.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)dialog.close()}});
 async function rpc(name,args){const r=await fetch(`${config.url.replace(/\/$/,'')}/rest/v1/rpc/${name}`,{method:'POST',headers:{apikey:config.key,'Content-Type':'application/json'},body:JSON.stringify(args),signal:AbortSignal.timeout(15000)});const body=await r.text();let data=null;try{data=body?JSON.parse(body):null}catch{if(r.ok)throw Error('Unexpected response. Please try again.')}if(!r.ok)throw Error(data?.message||'Could not connect. Please try again.');return data}
-function demoBallot(day){if(!demo[day]){demo[day]={meals:[],votes:[]};save('fc-demo',demo)}return structuredClone(demo[day])}
+function demoBallot(day){
+ if(!demo[day])demo[day]={meals:[],votes:[]};
+ const inherited=Object.entries(demo).filter(([date])=>date<=day).sort(([a],[b])=>a.localeCompare(b)).flatMap(([,b])=>b.meals).filter(m=>!m.id.startsWith('demo-'));
+ for(const meal of inherited){if(!demo[day].meals.some(m=>similarOption(m.name,meal.name)))demo[day].meals.push({...meal})}
+ save('fc-demo',demo);return structuredClone(demo[day]);
+}
 async function getBallot(day){return connected()?rpc('fc_ballot',{p_code:family.code,p_day:day}):demoBallot(day)}
 function header(){const on=connected();$('#connection').textContent=on?'Family connected':'Preview';$('#connection').classList.toggle('live',on);$('#family-button').textContent=on?`${family.name} · Family`:'Connect family';$('#demo-note').hidden=on}
 function renderDays(){
@@ -59,16 +67,40 @@ async function addOption(event){
  busy=true;renderBallot();$('#option-error').textContent='';
  try{
   if(connected())await rpc('fc_suggest',{p_code:family.code,p_token:family.token,p_day:day,p_name:name,p_category:'Comfort food',p_time:null,p_emoji:'🍽️'});
-  else{const b=demoBallot(day);if(b.meals.some(m=>m.name.toLowerCase()===name.toLowerCase()))throw Error('That option is already on the list.');if(b.meals.length>=15)throw Error('You can add up to 15 options per day.');demo[day].meals.push({id:crypto.randomUUID(),name});save('fc-demo',demo)}
+  else{const b=demoBallot(day),existing=b.meals.find(m=>similarOption(m.name,name));if(!optionKey(name))throw Error('Enter a food option.');if(existing)throw Error(`Already saved as "${existing.name}". Choose it from the options.`);if(b.meals.length>=100)throw Error('You can save up to 100 food options.');demo[day].meals.push({id:crypto.randomUUID(),name});save('fc-demo',demo)}
   $('#option-input').value='';await load(true);toast('Option added.');
  }catch(e){$('#option-error').textContent=e.message}
  finally{busy=false;renderBallot();$('#option-input').focus()}
 }
 
-function familyDialog(){if(!config.url||!config.key){setupDialog();return}if(connected()){modal(`<div class="eyebrow">YOUR TABLE</div><h2 class="dialog-title">Hey, ${esc(family.name)}.</h2><p class="dialog-intro">Your votes are shared with everyone using your family’s invite link. Keep the link within your family.</p><div class="dialog-actions"><button class="button primary" id="copy-invite">Copy family invite ↗</button><button class="button outline" id="leave-family">Leave on this device</button></div><p class="hint" style="margin-top:18px">Leaving removes this device’s identity. Your existing votes remain. Use a new display name if you rejoin, or save this browser’s data to keep your identity.</p>`);$('#copy-invite').onclick=copyInvite;$('#leave-family').onclick=()=>{family=null;localStorage.removeItem('fc-family');history.replaceState(null,'',location.pathname);dialog.close();load()};return}
-modal(`<div class="eyebrow">BETTER TOGETHER</div><h2 class="dialog-title">Pull up a chair.</h2><p class="dialog-intro">Start your family’s table, or join with an invite code.</p><form id="family-form"><label class="field">Your name<input name="name" maxlength="30" required placeholder="e.g. Faraz" autocomplete="given-name"></label><label class="field">Family invite code (to join)<input name="code" minlength="12" maxlength="80" placeholder="Leave blank to start a new family" value="${esc(inviteCode||'')}" autocomplete="off"></label><p class="hint">Your name identifies you on this phone. Each person should use their own phone and a different name.</p><p class="form-error" id="family-error" role="alert"></p><div class="dialog-actions"><button class="button primary" id="join-submit">Let’s eat together →</button><button type="button" class="text-button" id="edit-config">Connection settings</button></div></form>`);$('#edit-config').onclick=setupDialog;$('#family-form').onsubmit=async e=>{e.preventDefault();const f=new FormData(e.target);const name=f.get('name').trim();if(!name)return;const provided=f.get('code').trim();const code=provided||crypto.randomUUID().replaceAll('-','');$('#join-submit').disabled=true;try{const member=await rpc('fc_enter',{p_code:code,p_name:name,p_create:!provided,p_timezone:Intl.DateTimeFormat().resolvedOptions().timeZone});family={...member,code,name};save('fc-family',family);history.replaceState(null,'',location.pathname);dialog.close();load();toast(provided?'Welcome to the family table!':'Your table is ready. Invite your family!')}catch(err){$('#family-error').textContent=err.message;$('#join-submit').disabled=false}}}
+function familyDialog(){if(!config.url||!config.key){setupDialog();return}if(connected()){modal(`<div class="eyebrow">YOUR TABLE</div><h2 class="dialog-title">Hey, ${esc(family.name)}.</h2><p class="dialog-intro">Use your family invite for other people. Use your personal sign-in link for your own phone or laptop.</p><div class="dialog-actions"><button class="button primary" id="copy-invite">Copy family invite ↗</button><button class="button outline" id="copy-personal">Copy my phone sign-in link</button><button class="text-button" id="leave-family">Sign out on this device</button></div><p class="hint" style="margin-top:18px">Your personal link signs in as you. Keep it private and save it if you want to sign back in later. Your devices share one daily vote.</p>`);$('#copy-invite').onclick=copyInvite;$('#copy-personal').onclick=copyPersonalLink;$('#leave-family').onclick=()=>{family=null;localStorage.removeItem('fc-family');history.replaceState(null,'',location.pathname+location.search);dialog.close();load()};return}
+modal(`<div class="eyebrow">BETTER TOGETHER</div><h2 class="dialog-title">Pull up a chair.</h2><p class="dialog-intro">Start your family’s table, or join with an invite code.</p><form id="family-form"><label class="field">Your name<input name="name" maxlength="30" required placeholder="e.g. Faraz" autocomplete="given-name"></label><label class="field">Family invite code (to join)<input name="code" minlength="12" maxlength="80" placeholder="Leave blank to start a new family" value="${esc(inviteCode||'')}" autocomplete="off"></label><p class="hint">Your name identifies you on this phone. New members choose a unique name. Already joined on another device? Open Family there and copy your personal phone sign-in link.</p><p class="form-error" id="family-error" role="alert"></p><div class="dialog-actions"><button class="button primary" id="join-submit">Let’s eat together →</button><button type="button" class="text-button" id="edit-config">Connection settings</button></div></form>`);$('#edit-config').onclick=setupDialog;$('#family-form').onsubmit=async e=>{e.preventDefault();const f=new FormData(e.target);const name=f.get('name').trim();if(!name)return;const provided=f.get('code').trim();const code=provided||crypto.randomUUID().replaceAll('-','');$('#join-submit').disabled=true;try{const member=await rpc('fc_enter',{p_code:code,p_name:name,p_create:!provided,p_timezone:Intl.DateTimeFormat().resolvedOptions().timeZone});family={...member,code,name};save('fc-family',family);history.replaceState(null,'',location.pathname+location.search);dialog.close();load();toast(provided?'Welcome to the family table!':'Your table is ready. Invite your family!')}catch(err){$('#family-error').textContent=err.message;$('#join-submit').disabled=false}}}
 function setupDialog(){modal(`<div class="eyebrow">ONE-TIME FAMILY SETUP</div><h2 class="dialog-title">Connect your table.</h2><p class="dialog-intro">This site uses Supabase to share votes across phones. These are your project’s public connection details.</p><div class="setup-box">1. Create a free project at <a href="https://supabase.com/dashboard" target="_blank" rel="noreferrer">Supabase ↗</a>.<br>2. Run <a href="./setup.sql" target="_blank">setup.sql</a> in its SQL Editor.<br>3. Paste your project URL and publishable key below.</div><form id="setup-form"><label class="field">Project URL<input type="url" name="url" required placeholder="https://your-project.supabase.co" value="${esc(config.url||'')}"></label><label class="field">Publishable key (or legacy anon key)<input name="key" required placeholder="sb_publishable_…" value="${esc(config.key||'')}" autocomplete="off"></label><p class="hint">Never paste a secret key or service-role key. For everyone to connect automatically, put these public details in config.js before publishing.</p><p id="setup-error" class="form-error" role="alert"></p><div class="dialog-actions"><button class="button primary" id="save-setup">Check & connect →</button></div></form>`);$('#setup-form').onsubmit=async e=>{e.preventDefault();const f=new FormData(e.target),url=f.get('url').trim().replace(/\/$/,''),key=f.get('key').trim();if(!/^https:\/\/[a-z0-9-]+\.supabase\.co$/.test(url)){$('#setup-error').textContent='Use your HTTPS project URL from Supabase.';return}let role='';try{role=JSON.parse(atob(key.split('.')[1])).role}catch{}if(key.startsWith('sb_secret_')||role==='service_role'){$('#setup-error').textContent='Use a publishable or anon key, never a secret key.';return}const prev=config;config={url,key};$('#save-setup').disabled=true;try{await rpc('fc_health',{});save('fc-config',config);dialog.close();familyDialog()}catch(err){config=prev;$('#setup-error').textContent='Connection failed. Check the URL/key and run setup.sql first. '+err.message;$('#save-setup').disabled=false}};}
-async function copyInvite(){if(!connected()){familyDialog();return}const url=new URL(location.href);url.hash=new URLSearchParams({family:family.code}).toString();try{await navigator.clipboard.writeText(url.href);toast('Invite link copied. Share it with your family.')}catch{modal(`<h2 class="dialog-title">Your family invite.</h2><p class="dialog-intro">Copy this private link and send it to your family.</p><label class="field">Invite link<input readonly value="${esc(url.href)}"></label>`);}}
+async function copyLink(personal){
+ if(!connected()){familyDialog();return}
+ const url=new URL(location.href);url.searchParams.set('v','6');
+ url.hash=new URLSearchParams(personal?{family:family.code,member:family.token}:{family:family.code}).toString();
+ try{await navigator.clipboard.writeText(url.href);toast(personal?'Personal sign-in link copied. Open it on your phone.':'Invite link copied. Share it with your family.')}
+ catch{modal(`<h2 class="dialog-title">${personal?'Your personal sign-in link':'Your family invite'}</h2><p class="dialog-intro">${personal?'Open this on your own phone to sign in with the same name. Keep it private.':'Share this with your family so each person can join.'}</p><label class="field">${personal?'Personal sign-in link':'Invite link'}<input readonly value="${esc(url.href)}"></label>`)}
+}
+function copyInvite(){return copyLink(false)}
+function copyPersonalLink(){return copyLink(true)}
+async function start(){
+ if(personalToken){
+  busy=true;header();renderDays();renderBallot();$('#meals').innerHTML='<p class="empty-message">Signing you in…</p>';
+  try{
+   if(!inviteCode)throw Error('This sign-in link is incomplete.');
+   const member=await rpc('fc_resume',{p_code:inviteCode,p_token:personalToken});
+   if(!member?.member_id||!member?.name)throw Error('This sign-in link is invalid.');
+   family={...member,code:inviteCode,token:personalToken};save('fc-family',family);
+   toast(`Signed in as ${member.name}.`);
+  }catch(e){
+   await load();modal(`<h2 class="dialog-title">Couldn’t sign you in</h2><p class="dialog-intro">Open Family on your signed-in device and copy a fresh personal sign-in link.</p><p class="form-error">${esc(e.message)}</p>`);return;
+  }finally{busy=false;renderBallot()}
+  await load();return;
+ }
+ await load();if((inviteCode||(config.url&&config.key))&&!family)setTimeout(familyDialog,350);
+}
 
 $('#family-button').onclick=familyDialog;
 $('#prev-day').onclick=()=>chooseDay(shiftDate(selected,-1));
@@ -78,4 +110,4 @@ $('#option-form').onsubmit=addOption;
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)load(true)});
 window.addEventListener('storage',e=>{if(e.key==='fc-demo'){demo=read('fc-demo',{});load(true)}});
 setInterval(()=>{if(connected()&&!document.hidden&&!busy&&!dialog.open)load(true)},10000);
-load();if((inviteCode||(config.url&&config.key))&&!family)setTimeout(familyDialog,350);
+start();
